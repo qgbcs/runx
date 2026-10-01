@@ -2,7 +2,7 @@ import os
 import sys
 from pathlib import Path
 
-import edge_tts
+
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "multi_mqtt"))
 
@@ -11,6 +11,7 @@ from server_mqtt import MQTTServer
 
 
 async def tts(text: str, voice: str = "zh-CN-XiaoxiaoNeural", fmt: str = "mp3", response=None) -> bytes:
+    import edge_tts
     buf = b""
     comm = edge_tts.Communicate(text, voice=voice)
     async for chunk in comm.stream():
