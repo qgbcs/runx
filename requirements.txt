@@ -1,0 +1,4 @@
+paho-mqtt>=2.0
+ecdsa>=0.19
+prompt_toolkit>=3.0
+Pygments>=2.15
