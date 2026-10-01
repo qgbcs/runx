@@ -43,7 +43,7 @@ def main():
     ghs=start_rpc_server(port=port, ip=host, globals=globals(), locals=locals(), listen=False)
 
     public_key = b"ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBER9c5vu215n+5gv1YjGdm78Nf99wpfqw1fIT8nXib2FLUglq4NBMe7hLp2VOkqv9z00m5Wn+uUADH4zyXLiWzI="
-    gms = MQTTServer(globals=globals(), server_public_key_bytes=public_key)
+    gms = MQTTServer(request_topic='runx',globals=globals(), server_public_key_bytes=public_key)
     gms.mqtt_net.is_windows_cmd = False
     
     http_server = ThreadedHTTPServer((host, port), RunxRequestHandler)
