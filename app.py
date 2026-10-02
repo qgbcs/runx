@@ -527,6 +527,9 @@ QTTS_JS = """
 
   on(seekBar, "pointerdown", function (ev) {
     isDragging = true;
+    // 显式接管焦点：不同浏览器对 div+tabindex 的点击聚焦行为不一致，
+    // 不聚焦时空格会发给上一个焦点元素（常是"生成"按钮），表现为快捷键失灵。
+    try { seekBar.focus(); } catch (e) {}
     try { seekBar.setPointerCapture(ev.pointerId); } catch (e) {}
     seekToFraction(fractionFromEvent(seekBar, ev));
   });
@@ -558,7 +561,11 @@ QTTS_JS = """
     password: 1, number: 1, "": 1
   };
   function onSpaceKeydown(ev) {
-    if (ev.code !== "Space" || ev.repeat) return;
+    // 同时认 code/key/keyCode：部分内嵌 WebView（如 TRAE 内置浏览器）下发的
+    // 空格事件 code 与 key 为空串，只判 ev.code 会表现为"空格完全无效"。
+    var isSpace = ev.code === "Space" || ev.key === " " ||
+                  ev.key === "Spacebar" || ev.keyCode === 32;
+    if (!isSpace || ev.repeat) return;
     var tgt = ev.target, tag = (tgt && tgt.tagName || "").toLowerCase();
     // 焦点在浏览器原生播放器内部时交给原生处理，避免双方各切一次互相抵消
     if (tgt === player) return;
