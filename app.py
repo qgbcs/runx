@@ -252,6 +252,12 @@ TTS_UI = r"""
     生成语音（自动播放）
   </button>
   <span id="qtts-status" style="margin-left:12px;color:#555"></span>
+  <div style="margin:12px 0 2px;font-size:.8rem;color:#666">
+    当前请求 URL（点击全选，可直接复制；参数改动后实时刷新）
+  </div>
+  <input id="qtts-url" readonly spellcheck="false"
+    placeholder="点击“生成语音”后，这里显示实际请求的完整 RPC URL"
+    style="width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid #ccc;border-radius:6px;font-family:Consolas,Menlo,monospace;font-size:.78rem;color:#333;background:#f7f7f7;cursor:text">
   <canvas id="qtts-wave" height="96"
     style="width:100%;height:96px;margin-top:14px;background:#fafafa;border:1px solid #eee;border-radius:6px;cursor:pointer"></canvas>
   <div id="qtts-seek" role="slider" aria-label="播放进度" tabindex="0"
@@ -292,6 +298,7 @@ QTTS_JS = """
   var boundaryEl = $("qtts-boundary");
   var btn = $("qtts-btn");
   var statusEl = $("qtts-status");
+  var urlBox = $("qtts-url");
   var wave = $("qtts-wave");
   var wctx = wave.getContext("2d");
   var player = $("qtts-player");
@@ -334,9 +341,18 @@ QTTS_JS = """
   loadPrefs();
   syncLabels();
   [textEl, voiceEl, rateEl, volEl, pitchEl, boundaryEl].forEach(function (el) {
-    el.addEventListener("input", function () { syncLabels(); savePrefs(); });
-    el.addEventListener("change", savePrefs);
+    el.addEventListener("input", function () {
+      syncLabels(); savePrefs();
+      if (urlBox.value) syncUrlBox();   // 已生成过：URL 随参数实时刷新
+    });
+    el.addEventListener("change", function () {
+      savePrefs();
+      if (urlBox.value) syncUrlBox();
+    });
   });
+  // URL 展示框：点击/聚焦即全选，方便复制
+  urlBox.addEventListener("click", function () { urlBox.select(); });
+  urlBox.addEventListener("focus", function () { urlBox.select(); });
 
   // -------- 波形图（canvas 自绘，无外部依赖） --------
   var audioCtx = null;
@@ -524,12 +540,20 @@ QTTS_JS = """
     seekToFraction(fractionFromEvent(wave, ev));
   });
 
-  // ---------- 空格键：播放/暂停（焦点在文本框等可输入元素上时不拦截） ----------
+  // ---------- 空格键：播放/暂停（除文本输入外，任何焦点位置都由快捷键控制） ----------
+  var TEXT_INPUT_TYPES = {
+    text: 1, search: 1, url: 1, tel: 1, email: 1,
+    password: 1, number: 1, "": 1
+  };
   document.addEventListener("keydown", function (ev) {
     if (ev.code !== "Space" || ev.repeat) return;
     var tgt = ev.target, tag = (tgt && tgt.tagName || "").toLowerCase();
-    if (tag === "textarea" || tag === "input" || tag === "select" ||
-        (tgt && tgt.isContentEditable)) return;
+    // 焦点在浏览器原生播放器内部时交给原生处理，避免双方各切一次互相抵消
+    if (tgt === player) return;
+    // 只放行真正的文本编辑场景（只读展示框不算，如 URL 显示框）
+    if (tag === "textarea" || (tgt && tgt.isContentEditable)) return;
+    if (tag === "input" && !tgt.readOnly &&
+        TEXT_INPUT_TYPES.hasOwnProperty((tgt.type || "").toLowerCase())) return;
     if (!player.src) return;
     ev.preventDefault();
     if (player.paused || player.ended) {
@@ -556,6 +580,14 @@ QTTS_JS = """
       + ",voice=" + JSON.stringify(voiceEl.value)
       + (ka.length ? "," + ka.join(",") : "")
       + ",response=response)";
+  }
+
+  // 完整请求 URL 展示框（与实际发往播放器/fetch 的 URL 完全一致）
+  function syncUrlBox() {
+    try {
+      urlBox.value = location.origin + "/" +
+        encodeURIComponent(buildCode(textEl.value));
+    } catch (e) {}
   }
 
   function resetEngine() {
@@ -602,6 +634,7 @@ QTTS_JS = """
       }
     };
     var url = "/" + encodeURIComponent(buildCode(text));
+    syncUrlBox();
     whenLocalPromise = new Promise(function (res, rej) {
       localResolve = res; localReject = rej;
     });

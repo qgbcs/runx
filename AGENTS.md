@@ -259,7 +259,8 @@ JS 行为：
   - seek 一律夹到 `localCap()`（MSE=`bufferedEnd()`；blob=全曲），**物理上不可能发网络请求**；已结束状态下 seek 自动恢复播放。
   - 缓冲层（浅灰）/播放层（橙）由独立 rAF 循环实时刷新并同步 `aria-valuenow`。
 - **时间显示三段式**：当前播放时间 / `已缓存 mm:ss`（此范围内可随意跳转）/ 总时长；流式期间总时长先取已缓冲终点。
-- **空格键播放/暂停**：全局 keydown，焦点在 textarea/input/select/contenteditable 时不拦截（空格照常输入）；已结束时空格从头播放。
+- **空格键播放/暂停**：全局 keydown，**仅文本编辑元素**（textarea/contenteditable/文本类 input；只读框不算）放行空格，其余任何焦点位置（range 滑块、select、按钮、`#qtts-seek`）都由快捷键拦截切换；焦点在原生 `<audio>` 内部时**不拦截、交给原生**（否则双方各切一次互相抵消，表现为"按空格无效"）；已结束时空格从头播放。
+- **请求 URL 显示框**：生成按钮下方 `#qtts-url`（只读、占满面板宽度、点击全选可复制）；点击生成时填入与实际请求完全一致的完整 URL（`location.origin + "/" + encodeURIComponent(code)`），首次生成后随文本/参数改动实时刷新。
 - **localStorage 持久化**：键 `qtts-prefs-v1`，保存文本、发音人、语速/音量/音调、边界事件；刷新/重开页面自动恢复（含滑块标签），输入/改动即存。
 - **自动化测试接口 `window.__qtts`**：`generate(text,voice)`（返回 Promise，全量缓存完成时 resolve）、`play()/pause()/toggle()`、`seek(秒)`、`state()`（currentTime/duration/bufferedEnd/seekable/paused/ended/promoted/mode/src）、`whenLocal()`、`mseType`。在页面控制台或 `browser_evaluate` 里调用即可全自动验证，无需手点。
 - HTTP Range 206（见 §5.4）代码保留不动，作为直连/未提升场景的兜底；常规 UI 跳转不再走网络。
@@ -414,6 +415,7 @@ a54dc18 ssr_mode=False，自定义路由可达
 73cafd7 HTTP Range 206 + TTS LRU 缓存（播放中可 seek）
 （本地）自定义 #qtts-seek：缓冲区内本地跳转零网络请求；AGENTS.md 补 Range/缓存；代码迁移 RunxBuild（qgbcs/_，master 本地、main 远端自动构建）
 （本地）MediaSource 流式引擎：已缓存区间原生 seekable，seek 弹回根治；legacy 引擎保留 blob 提升；空格播放/暂停；三段时间（含已缓存）；localStorage 持久化文本与全部设置；移除 torch 修复 runx 构建 OOMKilled
+（本地）空格快捷键修正：仅文本编辑元素放行（修复滑块聚焦时空格无效；原生 audio 焦点交原生避免双切换）；生成按钮下新增全宽只读 URL 显示框（生成时填充、参数实时刷新、点击全选）；multi_mqtt 以 D:\test\multi_mqtt 为唯一上游同步到两个仓库
 ```
 
 ## 14. 安全红线
