@@ -177,13 +177,13 @@ async def tts(text: str, voice: str = 'zh-CN-YunxiNeural', fmt="mp3",
     return buf
 
 
-async def synthesize(text: str, voice: str, **ka) -> str:
-    if not text.strip():
-        raise gr.Error("请输入要合成的文本。")
-    audio = await tts(text, voice, **ka)
-    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as output:
-        output.write(audio)
-        return output.name
+# async def synthesize(text: str, voice: str, **ka) -> str:
+    # if not text.strip():
+        # raise gr.Error("请输入要合成的文本。")
+    # audio = await tts(text, voice, **ka)
+    # with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as output:
+        # output.write(audio)
+        # return output.name
 
 
 # HTTP RPC（根路径 / 与旧 /rpc）的持久命名空间在导入 server_http_wsgi
@@ -191,7 +191,7 @@ async def synthesize(text: str, voice: str, **ka) -> str:
 # 才能支持 /await tts('...',response=response) 这种直接调用。
 server_http_wsgi.RPCRequestHandler.executor.globals_dict.update({
     "tts": tts,
-    "synthesize": synthesize,
+    # "synthesize": synthesize,
 })
 
 
@@ -688,7 +688,7 @@ QTTS_JS = """
     if (boundaryEl.value === "WordBoundary")
       ka.push("boundary='WordBoundary'");
     // 约定参数顺序：voice → 各 edge-tts 参数 → response，text 以关键字放最后
-    return "await tts(voice=" + JSON.stringify(voiceEl.value)
+    return "await tts(voice='"+voiceEl.value+"'"
       + (ka.length ? "," + ka.join(",") : "")
       + ",response=response,text=" + JSON.stringify(text) + ")";
   }
