@@ -30,7 +30,7 @@
 HF 网关 ──► uvicorn (Gradio 6 自带 FastAPI, 端口 7860, ssr_mode=False)
              │
              ├─ /、/config、/gradio_api/* …… Gradio 前端
-             ├─ /health、/ui、/qtts-ui.js …… FastAPI 自定义路由
+             ├─ /health、/ui、/qtts-ui.js、/qtts-voices …… FastAPI 自定义路由
              └─ 其余所有路径 ── RootRPCMiddleware ──► a2wsgi WSGIMiddleware
                                                        │ (environ, PEP3333)
                                                        ▼
@@ -100,7 +100,7 @@ HF 网关 ──► uvicorn (Gradio 6 自带 FastAPI, 端口 7860, ssr_mode=Fals
 
 保留给 Gradio/FastAPI 的路径（不进 RPC）见 `app.py`：
 
-- 精确：`/`、`/config`、`/health`、`/ui`、`/favicon.ico`、`/manifest.json`、`/qtts-ui.js`、`/docs` 等
+- 精确：`/`、`/config`、`/health`、`/ui`、`/favicon.ico`、`/manifest.json`、`/qtts-ui.js`、`/qtts-voices`、`/docs` 等
 - 前缀：`/gradio_api/`、`/_app/`、`/static/`、`/assets/`、`/svelte/`、`/theme/`、`/file/`、`/rpc/`、`/api/` 等
 
 其余一切路径都按 RPC 代码执行。旧前缀 `/rpc/<code>` 仍然保留。
@@ -259,11 +259,13 @@ JS 行为：
   - seek 一律夹到 `localCap()`（MSE=`bufferedEnd()`；blob=全曲），**物理上不可能发网络请求**；已结束状态下 seek 自动恢复播放。
   - 缓冲层（浅灰）/播放层（橙）由独立 rAF 循环实时刷新并同步 `aria-valuenow`。
 - **时间显示三段式**：当前播放时间 / `已缓存 mm:ss`（此范围内可随意跳转）/ 总时长；流式期间总时长先取已缓冲终点。
-- **空格键播放/暂停**：全局 keydown（命名函数 `onSpaceKeydown`），**仅文本编辑元素**（textarea/contenteditable/文本类 input；只读框不算）放行空格，其余任何焦点位置（range 滑块、select、按钮、`#qtts-seek`）都由快捷键拦截切换；焦点在原生 `<audio>` 内部时**不拦截、交给原生**（否则双方各切一次互相抵消，表现为"按空格无效"）；已结束时空格从头播放。
+- **空格键播放/暂停**：全局 **capture 阶段** keydown（命名函数 `onSpaceKeydown`，`on(document,"keydown",...,true)`），**仅文本编辑元素**（textarea/contenteditable/文本类 input；只读框不算）放行空格，其余任何焦点位置（range 滑块、select、按钮、`#qtts-seek`、原生 `<audio>`）都由快捷键拦截切换；已结束时空格从头播放。
   - **空格识别必须三认**：`ev.code==="Space" || ev.key===" " || ev.keyCode===32`（含 `Spacebar` 兼容）。TRAE 内置浏览器等内嵌 WebView 下发的空格事件 `code`/`key` 都是空串、`keyCode=0`，只判 `ev.code` 会直接 return，表现为"选中进度条按空格完全无效"。
   - **点进度条必须显式 `seekBar.focus()`**：div+tabindex 在不同浏览器/自动化点击下不一定自动聚焦；不聚焦时空格会发给上一个焦点元素（常是"生成"按钮）。
-  - **脚本必须幂等**：`QTTS_JS` 所有持久监听一律走 `on(target,type,fn)`（记入 `window.__qttsCleanups`），rAF 循环检查 `uiAlive`；IIFE 开头先调用旧实例 `window.__qttsTeardown()` 再重绑。否则部署重连/Gradio 重挂载时 `img onerror` 会再次注入脚本，document 上叠加两个空格监听器，同一次按键被切换两次（暂停→立刻恢复），表现为"选中滑块按空格无效"。
-- **请求 URL 显示框**：生成按钮下方 `#qtts-url`（只读、占满面板宽度、点击全选可复制）；点击生成时填入与实际请求完全一致的完整 URL（`location.origin + "/" + encodeURIComponent(code)`），首次生成后随文本/参数改动实时刷新。
+  - **原生 `<audio>` 焦点必须主动 blur（2026-10 最终方案）**：鼠标点过原生控件（进度条/播放键）后焦点进入其 **UA shadow DOM**，此后物理 keydown **被 shadow 内部整个吞掉**——连 `document` 捕获阶段都收不到（插桩实测零事件），任何页面级快捷键都失灵，且 audio 外圈出现焦点黑框。注意这与"双方各切一次"不同：交给原生的老方案在该情况下物理键就是无效。现行做法是**不让焦点停留**：`pointerdown`/`click`（player 上）与 document capture 的 `focusin` 都调用 `releasePlayerFocus()`（setTimeout 0ms+200ms 两次 `player.blur()`，200ms 兜按住时间轴拖动；部分内嵌 WebView 程序化/交互聚焦连 `focus` 事件都不触发，故不能只靠 focus 监听）。鼠标操作不依赖焦点，blur 不影响点按/拖动。物理按键插桩验证：10 次空格全部在 capture 收到、active=BODY、每次恰好一次 play/pause。
+  - **脚本必须幂等**：`QTTS_JS` 所有持久监听一律走 `on(target,type,fn,opts)`（记入 `window.__qttsCleanups`），rAF 循环检查 `uiAlive`；IIFE 开头先调用旧实例 `window.__qttsTeardown()` 再重绑。否则部署重连/Gradio 重挂载时 `img onerror` 会再次注入脚本，document 上叠加两个空格监听器，同一次按键被切换两次（暂停→立刻恢复），表现为"选中滑块按空格无效"。
+- **请求 URL 显示框**：生成按钮下方 `#qtts-url`（只读、占满面板宽度、点击全选可复制）；点击生成时填入与实际请求完全一致的完整 URL，首次生成后随文本/参数改动实时刷新。URL 约定（`rpcUrl()`）：`"/" + encodeURIComponent(code)` 后把 `%2C→,`、`%3D→=` 还原，即**逗号和等号保持字面量**；代码参数顺序为 `await tts(voice="...",rate='...',pitch='...',response=response,text="...")`——**text 作为关键字参数放最后**（示例：`/await%20tts(voice=%22zh-CN-YunxiNeural%22,rate='-40%25',response=response,text=%2232%22)`）。
+- **发音人下拉是动态全量**：启动时 fetch `GET /qtts-voices`（服务端 `edge_tts.list_voices()` 进程内缓存 + asyncio.Lock，当前 **322** 个；该路径在 RPC 保留集合里），重建 `<select id="qtts-voice">`：9 个常用中文 ShortName 置顶（保留中文别名 label），其余中文/方言一个 optgroup（5 个），其他语种一个 optgroup（308 个，按 ShortName 排序）；填充后按 `preferredVoice`（localStorage 恢复值，否则 `zh-CN-YunxiNeural`）选中并 `syncUrlBox()`；fetch 失败则保留 HTML 内置的 9 个静态 option。
 - **localStorage 持久化**：键 `qtts-prefs-v1`，保存文本、发音人、语速/音量/音调、边界事件；刷新/重开页面自动恢复（含滑块标签），输入/改动即存。
 - **自动化测试接口 `window.__qtts`**：`generate(text,voice)`（返回 Promise，全量缓存完成时 resolve）、`play()/pause()/toggle()`、`seek(秒)`、`state()`（currentTime/duration/bufferedEnd/seekable/paused/ended/promoted/mode/src）、`whenLocal()`、`mseType`。在页面控制台或 `browser_evaluate` 里调用即可全自动验证，无需手点。
 - HTTP Range 206（见 §5.4）代码保留不动，作为直连/未提升场景的兜底；常规 UI 跳转不再走网络。
@@ -397,6 +399,7 @@ MP3 时长测量（本机无 mutagen 时）：`python -m pip install mutagen --p
 | 点按钮完全无反应、无网络请求 | Gradio 6 `gr.HTML` 内嵌 `<script>` 不执行 | img `onerror` 引导加载 `/qtts-ui.js` |
 | 选中滑块按空格"无效"（新标签页正常，旧标签页不行） | 部署重连/Gradio 重挂载后脚本被再次注入，document 叠加多个空格监听器，一次按键被切换两次互相抵消 | `QTTS_JS` 幂等：旧实例 `__qttsTeardown()` 拆除全部监听/rAF 后再重绑（`on()` 统一登记，`uiAlive` 守卫 rAF） |
 | 内嵌 WebView（TRAE 内置浏览器）里选中进度条按空格无效 | 内嵌 WebView 的空格事件 `code`/`key` 为空串，只判 `ev.code==="Space"` 全部漏判；且点击 div 进度条不一定自动聚焦，空格发给了原焦点按钮 | `onSpaceKeydown` 三认 `code/key/keyCode===32`；`pointerdown` 里显式 `seekBar.focus()` |
+| 点过原生 `<audio>` 控件后物理空格彻底无效（黑框包住原生播放器） | 焦点进入原生控件 UA shadow DOM，物理 keydown 被 shadow 内部吞掉，document 捕获阶段也收不到（不是双切换，是零事件） | keydown 改 document capture；任何与原生播放器的交互（`pointerdown`/`click`/capture `focusin`）后 `releasePlayerFocus()` 在 0ms/200ms 两次 `player.blur()`，焦点不进/不停留 shadow |
 | RunxBuild 新服务 503，Metrics 全 0、日志只有"Deploying application" | 建服务时 Language 选成了 **Docker**（免费档容器运行时起不来）；昨天可用的旧服务是 **Python** 构建（pip buildpack） | Settings → Language 改 **Python**，Build=`pip install -r requirements.txt`，Start=`python app.py`，Save 后推空提交触发重建 |
 | 手动测 rate 报错 | edge-tts 只接受带符号 `+30%` | 用规范化函数；int 直接可用 |
 | `/await tts(...)` → NameError tts | RPC 持久命名空间不含 app.py 的函数 | 启动时 `executor.globals_dict.update(...)` 注入 |
@@ -426,6 +429,7 @@ a54dc18 ssr_mode=False，自定义路由可达
 （本地）根治"旧标签页滑块空格无效"：脚本重注入导致 document 叠加多个空格监听器→一次按键双切换抵消；QTTS_JS 改为幂等（on() 登记+__qttsTeardown 拆除+uiAlive 守卫 rAF），Playwright 真实鼠标点击滑块+真实空格按键验证
 （线上）TRAE 内置浏览器里"选中进度条空格无效"：内嵌 WebView 空格事件 code/key 为空串→只认 ev.code 漏判；onSpaceKeydown 改为 code/key/keyCode===32 三认，pointerdown 显式 seekBar.focus()
 （线上）RunxBuild 新服务（ba69e75bc）全天 503：建服务时 Language 误选 Docker，免费档容器零指标、无日志、nginx 503；Settings 改 Python（pip install -r requirements.txt / python app.py）+ 空提交触发重建后恢复；以后新建 RunxBuild 服务必须选 Python
+（线上 e12b510/f444d4f）点过原生 audio 后物理空格彻底无效：根因是焦点进 UA shadow、keydown 被 shadow 吞掉（document capture 零事件）；keydown 改 capture 且 pointerdown/click/focusin 后 0ms+200ms 双 blur，物理按键插桩 10/10 单次切换。同批：URL 改 text 关键字置后、逗号等号不转义（rpcUrl）；新增 /qtts-voices（edge_tts.list_voices 缓存 322 个），下拉全量+常用中文置顶
 ```
 
 ## 14. 安全红线

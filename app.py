@@ -275,7 +275,7 @@ TTS_UI = r"""
     <span id="qtts-time-dur">--:--</span>
   </div>
   <audio id="qtts-player" controls autoplay preload="auto"
-    style="width:100%;margin-top:8px"></audio>
+    style="width:100%;margin-top:8px;outline:none;box-shadow:none"></audio>
 </div>
 <img id="qtts-boot" alt="" style="display:none"
   src="data:text/plain,boot"
@@ -339,12 +339,13 @@ QTTS_JS = """
       }));
     } catch (e) {}
   }
+  var preferredVoice = null;
   function loadPrefs() {
     var p = null;
     try { p = JSON.parse(localStorage.getItem(PREF_KEY) || "null"); } catch (e) {}
     if (!p) return;
     if (typeof p.text === "string") textEl.value = p.text;
-    if (p.voice) voiceEl.value = p.voice;
+    if (p.voice) { preferredVoice = p.voice; voiceEl.value = p.voice; }
     if (p.rate != null) rateEl.value = p.rate;
     if (p.volume != null) volEl.value = p.volume;
     if (p.pitch != null) pitchEl.value = p.pitch;
@@ -365,6 +366,75 @@ QTTS_JS = """
   // URL 展示框：点击/聚焦即全选，方便复制
   on(urlBox, "click", function () { urlBox.select(); });
   on(urlBox, "focus", function () { urlBox.select(); });
+
+  // ---------- 发音人下拉：edge_tts.list_voices() 全量（322），常用中文置顶 ----------
+  // 顺序：现有 9 个常用中文（保留中文别名）→ 其余中文/方言 → 全部其他语种。
+  // 请求失败时保留 HTML 内置的常用中文项，不影响使用。
+  var PINED_VOICES = {
+    "zh-CN-XiaoxiaoNeural": "晓晓 · 温暖女声",
+    "zh-CN-YunxiNeural": "云希 · 阳光少年",
+    "zh-CN-YunjianNeural": "云健 · 体育男声",
+    "zh-CN-XiaoyiNeural": "晓艺 · 活泼少女",
+    "zh-CN-YunxiaNeural": "云夏 · 卡通男声",
+    "zh-CN-YunyangNeural": "云扬 · 新闻男声",
+    "zh-HK-HiuGaaiNeural": "粤语 · HiuGaai",
+    "zh-HK-HiuMaanNeural": "粤语 · HiuMaan",
+    "zh-HK-WanLungNeural": "粤语 · WanLung"
+  };
+  function addVoiceOption(v, label) {
+    var op = document.createElement("option");
+    op.value = v;
+    op.textContent = label;
+    voiceEl.appendChild(op);
+  }
+  function otherVoiceLabel(it) {
+    var sex = it.gender === "Female" ? "女" : it.gender === "Male" ? "男" : "";
+    return it.v + " · " + (it.localeName || it.locale || "") +
+      (sex ? " · " + sex : "");
+  }
+  function populateVoices(all) {
+    var exist = {}, i;
+    for (i = 0; i < all.length; i++) exist[all[i].v] = all[i];
+    var pref = preferredVoice || voiceEl.value;
+    voiceEl.innerHTML = "";
+    Object.keys(PINED_VOICES).forEach(function (v) {
+      addVoiceOption(v, PINED_VOICES[v] + (exist[v] ? "" : "（不可用）"));
+    });
+    var byName = function (a, b) { return a.v < b.v ? -1 : a.v > b.v ? 1 : 0; };
+    var zhOthers = all.filter(function (it) {
+      return it.locale.toLowerCase().indexOf("zh") === 0 &&
+        !PINED_VOICES.hasOwnProperty(it.v);
+    }).sort(byName);
+    var rest = all.filter(function (it) {
+      return it.locale.toLowerCase().indexOf("zh") !== 0 &&
+        !PINED_VOICES.hasOwnProperty(it.v);
+    }).sort(byName);
+    var g1 = document.createElement("optgroup");
+    g1.label = "其他中文发音人 / 方言";
+    zhOthers.forEach(function (it) {
+      var op = document.createElement("option");
+      op.value = it.v; op.textContent = otherVoiceLabel(it);
+      g1.appendChild(op);
+    });
+    voiceEl.appendChild(g1);
+    var g2 = document.createElement("optgroup");
+    g2.label = "全部发音人（edge-tts，共 " + all.length + " 个）";
+    rest.forEach(function (it) {
+      var op = document.createElement("option");
+      op.value = it.v; op.textContent = otherVoiceLabel(it);
+      g2.appendChild(op);
+    });
+    voiceEl.appendChild(g2);
+    if (pref && exist[pref]) voiceEl.value = pref;
+    if (urlBox.value) syncUrlBox();
+  }
+  fetch("/qtts-voices?z=" + Date.now(), { cache: "no-store" })
+    .then(function (r) {
+      if (!r.ok) throw new Error("voices " + r.status);
+      return r.json();
+    })
+    .then(populateVoices)
+    .catch(function () { /* 保留内置常用中文项 */ });
 
   // -------- 波形图（canvas 自绘，无外部依赖） --------
   var audioCtx = null;
@@ -567,13 +637,13 @@ QTTS_JS = """
                   ev.key === "Spacebar" || ev.keyCode === 32;
     if (!isSpace || ev.repeat) return;
     var tgt = ev.target, tag = (tgt && tgt.tagName || "").toLowerCase();
-    // 焦点在浏览器原生播放器内部时交给原生处理，避免双方各切一次互相抵消
-    if (tgt === player) return;
     // 只放行真正的文本编辑场景（只读展示框不算，如 URL 显示框）
     if (tag === "textarea" || (tgt && tgt.isContentEditable)) return;
     if (tag === "input" && !tgt.readOnly &&
         TEXT_INPUT_TYPES.hasOwnProperty((tgt.type || "").toLowerCase())) return;
     if (!player.src) return;
+    // 必须在 capture 阶段 preventDefault：本监听先于原生 <audio> UA shadow
+    // 内部控件（播放键/时间轴）拿到事件，否则原生与本函数会各切一次互相抵消。
     ev.preventDefault();
     if (player.paused || player.ended) {
       if (player.ended) seekTo(0);
@@ -582,7 +652,29 @@ QTTS_JS = """
       player.pause();
     }
   }
-  on(document, "keydown", onSpaceKeydown);
+  // 第三个参数 true = 捕获阶段：比 UA shadow 里的原生控件更早拿到空格
+  on(document, "keydown", onSpaceKeydown, true);
+
+  // 原生 <audio> 的时间轴/播放键位于 UA shadow DOM：一旦点击使焦点进入其内部，
+  // 物理按键事件会被 shadow 内部吞掉、根本不冒泡到页面（实测 document capture
+  // 也收不到），任何页面级快捷键都失灵，且 audio 外圈出现焦点黑框。
+  // 解法：任何交互后立刻把焦点移出（鼠标点击/拖动不依赖焦点，功能不受影响），
+  // 让后续空格永远落在页面上，由上面的全局捕获处理。
+  function releasePlayerFocus() {
+    // 0ms 兜普通点击；200ms 兜按住时间轴拖动（mousedown 默认聚焦发生在事件派发后）
+    [0, 200].forEach(function (ms) {
+      setTimeout(function () {
+        try { if (document.activeElement === player) player.blur(); } catch (e) {}
+      }, ms);
+    });
+  }
+  on(player, "pointerdown", releasePlayerFocus);
+  on(player, "click", releasePlayerFocus);
+  // 焦点进入 UA shadow 时 focus 事件在部分 WebView 不触发；focusin 会冒泡，
+  // document 捕获阶段再守一道（键盘 Tab 聚焦等场景）
+  on(document, "focusin", function () {
+    if (document.activeElement === player) releasePlayerFocus();
+  }, true);
 
   // ---------- 合成代码与任务生命周期 ----------
   function buildCode(text) {
@@ -595,18 +687,23 @@ QTTS_JS = """
       ka.push("pitch='" + signedNum(+pitchEl.value, "Hz") + "'");
     if (boundaryEl.value === "WordBoundary")
       ka.push("boundary='WordBoundary'");
-    // 与 /await tts('...',voice='...',rate='+50%',response=response) 完全一致
-    return "await tts(" + JSON.stringify(text)
-      + ",voice=" + JSON.stringify(voiceEl.value)
+    // 约定参数顺序：voice → 各 edge-tts 参数 → response，text 以关键字放最后
+    return "await tts(voice=" + JSON.stringify(voiceEl.value)
       + (ka.length ? "," + ka.join(",") : "")
-      + ",response=response)";
+      + ",response=response,text=" + JSON.stringify(text) + ")";
+  }
+
+  // RPC URL：正常 percent-encode，但逗号与等号保留字面量（可读性/复制友好，
+  // 且它们都是 RFC3986 合法的路径字符）；展示框与实际请求共用此函数，保证一致
+  function rpcUrl(code) {
+    return "/" + encodeURIComponent(code)
+      .replace(/%2C/g, ",").replace(/%3D/g, "=");
   }
 
   // 完整请求 URL 展示框（与实际发往播放器/fetch 的 URL 完全一致）
   function syncUrlBox() {
     try {
-      urlBox.value = location.origin + "/" +
-        encodeURIComponent(buildCode(textEl.value));
+      urlBox.value = location.origin + rpcUrl(buildCode(textEl.value));
     } catch (e) {}
   }
 
@@ -653,7 +750,7 @@ QTTS_JS = """
         localResolve = null; localReject = null;
       }
     };
-    var url = "/" + encodeURIComponent(buildCode(text));
+    var url = rpcUrl(buildCode(text));
     syncUrlBox();
     whenLocalPromise = new Promise(function (res, rej) {
       localResolve = res; localReject = rej;
@@ -926,6 +1023,34 @@ def tts_ui_js():
     )
 
 
+# edge_tts.list_voices() 全量发音人（当前 322 个），供前端下拉动态填充。
+# 进程内缓存一次即可，列表基本不变；失败时返回 502，前端退化为仅内置中文项。
+_VOICES_CACHE = None
+_VOICES_LOCK = asyncio.Lock()
+
+
+@server.get("/qtts-voices", include_in_schema=False)
+async def tts_voices():
+    global _VOICES_CACHE
+    if _VOICES_CACHE is None:
+        async with _VOICES_LOCK:
+            if _VOICES_CACHE is None:
+                import edge_tts
+                vs = await edge_tts.list_voices()
+                _VOICES_CACHE = [
+                    {
+                        "v": x.get("ShortName", ""),
+                        "locale": x.get("Locale", ""),
+                        "localeName": x.get("LocaleName", ""),
+                        "gender": x.get("Gender", ""),
+                        "friendly": x.get("FriendlyName", ""),
+                    }
+                    for x in vs
+                    if x.get("ShortName")
+                ]
+    return _VOICES_CACHE
+
+
 # 兼容旧 /rpc/<code> 前缀；新的 RPC 直接在根路径 /<code>（见下面的中间件）。
 server.mount("/rpc", WSGIMiddleware(server_http_wsgi.application))
 
@@ -937,7 +1062,7 @@ server.mount("/rpc", WSGIMiddleware(server_http_wsgi.application))
 RESERVED_EXACT = {
     "", "/", "/config", "/config/", "/favicon.ico", "/theme.css", "/robots.txt",
     "/manifest.json", "/login", "/login/", "/logout", "/health", "/ui",
-    "/docs", "/redoc", "/openapi.json", "/qtts-ui.js",
+    "/docs", "/redoc", "/openapi.json", "/qtts-ui.js", "/qtts-voices",
 }
 RESERVED_PREFIX = (
     "/gradio_api/", "/_app/", "/static/", "/assets/", "/svelte/", "/theme/",
