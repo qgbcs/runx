@@ -7,6 +7,5 @@ edge-tts>=7.0,<8
 paho-mqtt>=2.0,<3
 ecdsa>=0.19,<1
 cryptography>=42
-torch>=2.8,<3
 prompt_toolkit>=3.0,<4
 Pygments>=2.15

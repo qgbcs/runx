@@ -60,7 +60,7 @@ HF 网关 ──► uvicorn (Gradio 6 自带 FastAPI, 端口 7860, ssr_mode=Fals
 | 路径 | 作用 |
 |---|---|
 | `app.py` | Space 入口：参数规范化、`tts()`/`synthesize()`、自定义 UI、FastAPI 路由、根路径 RPC 中间件、`demo.launch()` |
-| `requirements.txt` | Space 依赖（gradio 6.28 / edge-tts 7.x / a2wsgi / paho-mqtt / torch 等） |
+| `requirements.txt` | Space 依赖（gradio 6.28 / edge-tts 7.x / a2wsgi / paho-mqtt 等；**不含 torch**，ZeroGPU worker 自带） |
 | `README.md` | HF Space 元数据（**YAML frontmatter 必须保留**）+ 运维说明 |
 | `multi_mqtt/rpc_executor.py` | 与传输无关的 `PythonExecutor`：REPL 语义、顶层 await、协程调度 |
 | `multi_mqtt/server_http.py` | 独立 BaseHTTP RPC 服务器 + `RPCRequestHandler.handle_rpc`（HTTP 下 RPC 语义的唯一权威实现） |
@@ -254,11 +254,14 @@ JS 行为：
 - **波形**：同时 `fetch(url) → arrayBuffer → AudioContext.decodeAudioData → 分桶峰值 → canvas 绘制**；rAF 循环根据 `currentTime/duration` 把已播放部分染橙，未播放为灰色；支持 devicePixelRatio 与窗口缩放重算。波形在整段下载解码后画出，不影响音频先行开播。
 - **本地缓冲内跳转（不发网络请求）**：`#qtts-seek`（`role="slider"`）支持 pointer 点击与拖动、键盘（←/→ ±5s、Home/End）；点击波形画布也可跳转。
   - **根因（已实测）**：chunked 无 Content-Length 的 mp3 即使全部缓冲完，媒体引擎仍报 `seekable=[0,0]`（实测 duration 已知也是如此），直接设 `currentTime` 会被拒绝 → "圆点立马弹回"。
-  - **修法 = 全量后 blob 提升**：画波形那次 `fetch` 拿到完整 arrayBuffer 时，`promoteToLocal()` 立即用它建 `Blob`（`audio/mpeg`）→ `URL.createObjectURL` → 切到 blob 源（保留 currentTime 与播放状态）。blob 源 `seekable` 覆盖全曲、duration 精确，**全程本地，物理上不可能发网络请求**。
-  - 流式阶段（提升前）：seek 夹到 `bufferedEnd()`，但媒体引擎可能拒绝——此阶段尚无更多本地数据，符合"只能跳已缓存部分"。
-  - 已结束状态下 seek 会自动恢复播放。
+  - **现行修法（Chrome/Edge）= MediaSource 流式引擎**：`startMSE()` 建 `MediaSource`，`fetch(url)` 以 ReadableStream 读响应，每个 mp3 块按序 `appendBuffer()` 到 SourceBuffer（mp3 是 generated timestamps，`mode` 只能是 `"sequence"`）。**已 append 的区间原生 seekable**——流式阶段就能在已缓存范围内任意点/拖，不再弹回；无需等全量、无需换源。
+  - **legacy 兜底引擎**：浏览器不支持 MSE（Firefox/Safari）时，`player.src` 直接走流式；全量 fetch 拿到 arrayBuffer 后 `promoteToLocal()` 建 blob ObjectURL 切源（保留 currentTime 与播放状态），blob 源 seekable 覆盖全曲、duration 精确。
+  - seek 一律夹到 `localCap()`（MSE=`bufferedEnd()`；blob=全曲），**物理上不可能发网络请求**；已结束状态下 seek 自动恢复播放。
   - 缓冲层（浅灰）/播放层（橙）由独立 rAF 循环实时刷新并同步 `aria-valuenow`。
-- **自动化测试接口 `window.__qtts`**：`generate(text,voice)`（返回 Promise，blob 提升完成时 resolve）、`play()/pause()`、`seek(秒)`、`state()`（currentTime/duration/bufferedEnd/seekable/paused/ended/promoted/src）、`whenLocal()`。在页面控制台或 `browser_evaluate` 里调用即可全自动验证，无需手点。
+- **时间显示三段式**：当前播放时间 / `已缓存 mm:ss`（此范围内可随意跳转）/ 总时长；流式期间总时长先取已缓冲终点。
+- **空格键播放/暂停**：全局 keydown，焦点在 textarea/input/select/contenteditable 时不拦截（空格照常输入）；已结束时空格从头播放。
+- **localStorage 持久化**：键 `qtts-prefs-v1`，保存文本、发音人、语速/音量/音调、边界事件；刷新/重开页面自动恢复（含滑块标签），输入/改动即存。
+- **自动化测试接口 `window.__qtts`**：`generate(text,voice)`（返回 Promise，全量缓存完成时 resolve）、`play()/pause()/toggle()`、`seek(秒)`、`state()`（currentTime/duration/bufferedEnd/seekable/paused/ended/promoted/mode/src）、`whenLocal()`、`mseType`。在页面控制台或 `browser_evaluate` 里调用即可全自动验证，无需手点。
 - HTTP Range 206（见 §5.4）代码保留不动，作为直连/未提升场景的兜底；常规 UI 跳转不再走网络。
 
 ## 9. 本地开发环境（Windows）
@@ -342,12 +345,12 @@ curl.exe -sS --proxy socks5h://127.0.0.1:41080 `
 平台事实（文档：https://www.runxbuild.com/docs/services/python/ ）：
 
 - 自动执行构建命令 `pip install -r requirements.txt`；**应用必须监听 `PORT` 环境变量**并绑定 `0.0.0.0`。
-- 每次 push 到部署分支（本仓库 `qgbcs/_` 为 **master**，私有）自动触发构建+滚动部署。
+- 每次 push 到部署分支（GitHub `qgbcs/_` 的 **main 分支**；本地 runx 仓库在 master 上，推送用 `master:main`）自动触发构建+滚动部署。
 - `app.py` 的 `main()` 已满足要求：`server_port` 取 `GRADIO_SERVER_PORT`/`PORT`，`server_name="0.0.0.0"`；`ssr_mode=False` 在非 HF 环境同样生效。
 - 与 HF 的差异：
   - HF 镜像预装 `spaces`；RunxBuild 靠 requirements 安装（已加 `spaces>=0.30`）。`@spaces.GPU` 在非 ZeroGPU 环境是透传 no-op，自检按钮在无 CUDA 机器上会报错——不要点。
   - 无 ZeroGPU 启动检测，不会因缺 GPU 回调而 503。
-  - torch 依赖体积大，首次构建较慢（数分钟，正常）。
+  - 已从 requirements 移除 torch（不再装任何 nvidia CUDA 包），构建快且不会 OOM。
 
 本地操作（在 `d:\test\github\runx`）：
 
@@ -392,6 +395,7 @@ MP3 时长测量（本机无 mutagen 时）：`python -m pip install mutagen --p
 | MQTT 请求超时无回包 | 服务端验签开启但客户端未用匹配私钥 | 用与 PUBLIC_KEY 匹配的真实私钥 |
 | 播放中拖动进度条不跳转/要暂停才能跳 | chunked 流无 Content-Length，原生时间轴无法定位未缓冲位置 | 自定义 `#qtts-seek`：只在本地缓冲范围内 seek，夹到 bufferedEnd，不发网络请求；未缓冲位置由服务端 Range 206 兜底 |
 | RunxBuild 启动即 `ModuleNotFoundError: spaces` | 平台不像 HF 预装 spaces | requirements.txt 已加 `spaces>=0.30` |
+| RunxBuild 构建 `OOMKilled; exitCode=137`（`Taking snapshot of full filesystem` 阶段） | `torch` 拉入整套 nvidia CUDA 包（cu13、triton、cuda-toolkit，解压后数 GB），构建机内存不足 | requirements.txt 移除 torch：它只在 `zerogpu_self_test()` 里惰性 import，ZeroGPU worker 运行时自带 torch，主进程不需要 |
 | RunxBuild 服务无响应/健康检查失败 | 未监听平台给定 PORT | 确认用 `python app.py`（main 读取 PORT 绑 0.0.0.0），勿硬编码端口 |
 | `address already in use` | 多个监听器/launch | 只允许 Gradio 一个监听者，删 Dockerfile/额外启动 |
 | 发布即旧界面 | 浏览器缓存 | URL 加 `?v=时间戳`、DevTools Disable cache |
@@ -408,7 +412,8 @@ a54dc18 ssr_mode=False，自定义路由可达
 9503b5e 修复：gr.HTML 脚本不执行 → img 引导 /qtts-ui.js
 2996d07 修复：WSGI latin-1→utf-8（音频朗读乱码）+ 恢复 canvas 波形图
 73cafd7 HTTP Range 206 + TTS LRU 缓存（播放中可 seek）
-（本地）自定义 #qtts-seek：缓冲区内本地跳转零网络请求；AGENTS.md 补 Range/缓存；代码迁移 RunxBuild（qgbcs/_，master 自动构建）
+（本地）自定义 #qtts-seek：缓冲区内本地跳转零网络请求；AGENTS.md 补 Range/缓存；代码迁移 RunxBuild（qgbcs/_，master 本地、main 远端自动构建）
+（本地）MediaSource 流式引擎：已缓存区间原生 seekable，seek 弹回根治；legacy 引擎保留 blob 提升；空格播放/暂停；三段时间（含已缓存）；localStorage 持久化文本与全部设置；移除 torch 修复 runx 构建 OOMKilled
 ```
 
 ## 14. 安全红线

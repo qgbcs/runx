@@ -263,8 +263,10 @@ TTS_UI = r"""
     <div id="qtts-seek-played"
       style="position:absolute;left:0;top:0;bottom:0;width:0;background:#f59e0b;border-radius:7px"></div>
   </div>
-  <div style="font-size:.85rem;color:#666;display:flex;justify-content:space-between">
-    <span id="qtts-time-cur">00:00</span><span id="qtts-time-dur">00:00</span>
+  <div style="font-size:.85rem;color:#666;display:flex;justify-content:space-between;align-items:center">
+    <span id="qtts-time-cur">0:00</span>
+    <span id="qtts-time-buf" style="color:#999">已缓存 0:00（此范围内可随意跳转）</span>
+    <span id="qtts-time-dur">--:--</span>
   </div>
   <audio id="qtts-player" controls autoplay preload="auto"
     style="width:100%;margin-top:8px"></audio>
@@ -281,25 +283,62 @@ QTTS_JS = """
 (function () {
   function $(id) { return document.getElementById(id); }
 
-  ["rate", "volume"].forEach(function (name) {
-    var slider = $("qtts-" + name), label = $("qtts-" + name + "-v");
-    slider.addEventListener("input", function () {
-      label.textContent = (+slider.value >= 0 ? "+" : "") + slider.value + "%";
-    });
-  });
-  var ps = $("qtts-pitch"), pl = $("qtts-pitch-v");
-  ps.addEventListener("input", function () {
-    pl.textContent = (+ps.value >= 0 ? "+" : "") + ps.value + "Hz";
-  });
-
-  function signed(slider, unit) {
-    var n = +slider.value;
-    return (n >= 0 ? "+" : "") + n + unit;
-  }
-
-  // -------- 波形图（恢复第一版 gr.Audio 的波形可视化；canvas 自绘，无外部依赖） --------
+  // ---------- 控件引用 ----------
+  var textEl = $("qtts-text");
+  var voiceEl = $("qtts-voice");
+  var rateEl = $("qtts-rate"), rateLab = $("qtts-rate-v");
+  var volEl = $("qtts-volume"), volLab = $("qtts-volume-v");
+  var pitchEl = $("qtts-pitch"), pitchLab = $("qtts-pitch-v");
+  var boundaryEl = $("qtts-boundary");
+  var btn = $("qtts-btn");
+  var statusEl = $("qtts-status");
   var wave = $("qtts-wave");
   var wctx = wave.getContext("2d");
+  var player = $("qtts-player");
+  var seekBar = $("qtts-seek");
+  var seekBuffered = $("qtts-seek-buffered");
+  var seekPlayed = $("qtts-seek-played");
+  var timeCur = $("qtts-time-cur");
+  var timeBuf = $("qtts-time-buf");
+  var timeDur = $("qtts-time-dur");
+
+  function signedNum(n, unit) { return (n >= 0 ? "+" : "") + n + unit; }
+  function syncLabels() {
+    rateLab.textContent = signedNum(+rateEl.value, "%");
+    volLab.textContent = signedNum(+volEl.value, "%");
+    pitchLab.textContent = signedNum(+pitchEl.value, "Hz");
+  }
+
+  // ---------- 本地持久化：刷新/重开页面，文本与全部设置不丢失 ----------
+  var PREF_KEY = "qtts-prefs-v1";
+  function savePrefs() {
+    try {
+      localStorage.setItem(PREF_KEY, JSON.stringify({
+        text: textEl.value, voice: voiceEl.value,
+        rate: rateEl.value, volume: volEl.value, pitch: pitchEl.value,
+        boundary: boundaryEl.value
+      }));
+    } catch (e) {}
+  }
+  function loadPrefs() {
+    var p = null;
+    try { p = JSON.parse(localStorage.getItem(PREF_KEY) || "null"); } catch (e) {}
+    if (!p) return;
+    if (typeof p.text === "string") textEl.value = p.text;
+    if (p.voice) voiceEl.value = p.voice;
+    if (p.rate != null) rateEl.value = p.rate;
+    if (p.volume != null) volEl.value = p.volume;
+    if (p.pitch != null) pitchEl.value = p.pitch;
+    if (p.boundary) boundaryEl.value = p.boundary;
+  }
+  loadPrefs();
+  syncLabels();
+  [textEl, voiceEl, rateEl, volEl, pitchEl, boundaryEl].forEach(function (el) {
+    el.addEventListener("input", function () { syncLabels(); savePrefs(); });
+    el.addEventListener("change", savePrefs);
+  });
+
+  // -------- 波形图（canvas 自绘，无外部依赖） --------
   var audioCtx = null;
   var peaks = null;          // 归一化峰值数组
   var lastChannel = null;    // 保留解码后的声道数据，窗口缩放时重算峰值
@@ -351,62 +390,62 @@ QTTS_JS = """
     rafId = requestAnimationFrame(drawWave);
   }
 
-  // 全量数据到手后：① 提升为本地 blob 源（seek 不再受 seekable=[0,0] 限制，
-  // 全程本地不发网络请求）；② 解码画波形。gen 用来丢弃上一条任务的迟到结果。
-  function loadWaveform(url, gen) {
+  function drawWaveHint(msg, color) {
     if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
     peaks = null;
     lastChannel = null;
     var size = sizeCanvas();
     wctx.clearRect(0, 0, size.w, size.h);
     wctx.font = "13px sans-serif";
-    wctx.fillStyle = "#999";
-    wctx.fillText("波形生成中…", 10, size.h / 2);
+    wctx.fillStyle = color || "#999";
+    wctx.fillText(msg, 10, size.h / 2);
+  }
 
+  // 全量 mp3 字节到手后解码画波形（两种播放引擎共用）。
+  function decodeAndDraw(buf, gen) {
     if (!audioCtx) {
       var AC = window.AudioContext || window.webkitAudioContext;
       if (AC) audioCtx = new AC();
     }
-    if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
-
-    fetch(url).then(function (resp) { return resp.arrayBuffer(); })
-      .then(function (buf) {
-        if (gen !== generation) return;
-        promoteToLocal(buf, gen);            // 不依赖解码，尽早切换
-        return audioCtx.decodeAudioData(buf).then(function (audio) {
-          if (gen !== generation) return;
-          lastChannel = audio.getChannelData(0);
-          peaks = computePeaks(lastChannel);
-          if (rafId !== null) cancelAnimationFrame(rafId);
-          rafId = requestAnimationFrame(drawWave);
-        });
-      })
-      .catch(function () {
-        var s2 = sizeCanvas();
-        wctx.clearRect(0, 0, s2.w, s2.h);
-        wctx.fillStyle = "#c0392b";
-        wctx.fillText("波形生成失败（不影响播放）", 10, s2.h / 2);
-      });
+    if (!audioCtx) return;
+    if (audioCtx.state === "suspended") audioCtx.resume();
+    // decodeAudioData 会 detach 传入的 ArrayBuffer，先拷贝一份
+    audioCtx.decodeAudioData(buf.slice(0)).then(function (audio) {
+      if (gen !== generation) return;
+      lastChannel = audio.getChannelData(0);
+      peaks = computePeaks(lastChannel);
+      if (rafId !== null) cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(drawWave);
+    }).catch(function () {
+      if (gen === generation)
+        drawWaveHint("波形生成失败（不影响播放）", "#c0392b");
+    });
   }
 
   window.addEventListener("resize", function () {
     if (lastChannel) peaks = computePeaks(lastChannel);
   });
 
-  // -------- 本地缓冲内跳转（不发网络请求；播放中可随意点击/拖动） --------
-  var player = $("qtts-player");
-  var seekBar = $("qtts-seek");
-  var seekBuffered = $("qtts-seek-buffered");
-  var seekPlayed = $("qtts-seek-played");
-  var timeCur = $("qtts-time-cur");
-  var timeDur = $("qtts-time-dur");
+  // ---------- 播放引擎状态 ----------
+  var generation = 0;
+  var engineMode = "";                 // "mse" | "legacy"
+  var mediaSource = null, srcBuf = null, msUrl = null;
+  var appendQueue = [], streamDone = false, allChunks = [];
+  var blobUrl = null, promoted = false;
+  var localResolve = null, localReject = null, whenLocalPromise = null;
   var isDragging = false;
 
-  // 当前合成任务的世代号；blob 本地源状态
-  var generation = 0;
-  var blobUrl = null;
-  var promoted = false;
-  var localResolve = null, localReject = null, whenLocalPromise = null;
+  // Chrome/Edge：用 MediaSource 喂流。已 append 的区间原生 seekable，
+  // 缓冲区内任意点击/拖动都不会再被弹回；不支持时走 legacy 直接流+blob 提升。
+  var MSE_TYPE = (function () {
+    try {
+      if (!window.MediaSource) return "";
+      if (MediaSource.isTypeSupported("audio/mpeg")) return "audio/mpeg";
+      if (MediaSource.isTypeSupported('audio/mpeg; codecs="mp3"'))
+        return 'audio/mpeg; codecs="mp3"';
+    } catch (e) {}
+    return "";
+  })();
 
   function fmtTime(s) {
     s = Math.max(0, Math.floor(s || 0));
@@ -418,15 +457,20 @@ QTTS_JS = """
     return player.buffered.length ? player.buffered.end(player.buffered.length - 1) : 0;
   }
 
-  // 流式期间 duration 未知，用已缓冲终点作为临时总长；blob 提升后用真实 duration。
-  function totalSpan() {
-    if (promoted && player.duration > 0) return player.duration;
-    return (player.duration && player.duration > 0) ? player.duration : bufferedEnd();
+  function knownDuration() {
+    var d = player.duration;
+    return (d && d > 0 && d !== Infinity) ? d : 0;
   }
 
-  // 本地可跳到的最远位置：blob 源 → 全曲；流式 → 已缓冲终点。
+  // 流式期间 duration 未知，用已缓冲终点作为临时总长
+  function totalSpan() {
+    if (promoted && knownDuration()) return knownDuration();
+    return knownDuration() || bufferedEnd();
+  }
+
+  // 本地可跳到的最远位置：MSE/已 append 区间或 blob 全曲
   function localCap() {
-    if (promoted && player.duration > 0) return player.duration;
+    if (promoted) return knownDuration() || bufferedEnd();
     return bufferedEnd();
   }
 
@@ -436,41 +480,16 @@ QTTS_JS = """
     var wasEnded = player.ended;
     try { player.currentTime = t; } catch (e) {}
     // 已播完时点击进度条：恢复播放（否则 seek 后停在该位置）
-    if (wasEnded && t < (player.duration || Infinity)) {
+    if (wasEnded && t < (knownDuration() || Infinity)) {
       player.play().catch(function () {});
     }
-    return player.currentTime;          // blob 源下立即生效；流式源可能被引擎拒绝
+    return player.currentTime;
   }
 
   function seekToFraction(fr) {
     var total = totalSpan();
     if (!total) return;
     seekTo(Math.min(1, Math.max(0, fr)) * total);
-  }
-
-  // 全量 mp3 已在内存 → 换成 blob Object URL：blob 源 seekable 覆盖全曲、
-  // duration 精确、全程本地零网络请求；保留播放位置与播放状态。
-  function promoteToLocal(buf, gen) {
-    if (gen !== generation || promoted) return;
-    var url2 = URL.createObjectURL(new Blob([buf], { type: "audio/mpeg" }));
-    var wasPlaying = !player.paused && !player.ended;
-    var pos = player.currentTime || 0;
-    function onMeta() {
-      player.removeEventListener("loadedmetadata", onMeta);
-      if (gen !== generation) { URL.revokeObjectURL(url2); return; }
-      blobUrl = url2;
-      promoted = true;
-      try { player.currentTime = Math.min(pos, player.duration || pos); } catch (e) {}
-      if (wasPlaying) {
-        player.play().catch(function () {
-          $("qtts-status").textContent = "已切换到本地源，请点播放器播放";
-        });
-      }
-      $("qtts-status").textContent = "已全部缓存到本地：可任意点击/拖动跳转，无需联网";
-      if (localResolve) { localResolve(state()); localResolve = null; localReject = null; }
-    }
-    player.addEventListener("loadedmetadata", onMeta);
-    player.src = url2;
   }
 
   function fractionFromEvent(el, ev) {
@@ -505,8 +524,232 @@ QTTS_JS = """
     seekToFraction(fractionFromEvent(wave, ev));
   });
 
+  // ---------- 空格键：播放/暂停（焦点在文本框等可输入元素上时不拦截） ----------
+  document.addEventListener("keydown", function (ev) {
+    if (ev.code !== "Space" || ev.repeat) return;
+    var tgt = ev.target, tag = (tgt && tgt.tagName || "").toLowerCase();
+    if (tag === "textarea" || tag === "input" || tag === "select" ||
+        (tgt && tgt.isContentEditable)) return;
+    if (!player.src) return;
+    ev.preventDefault();
+    if (player.paused || player.ended) {
+      if (player.ended) seekTo(0);
+      player.play().catch(function () {});
+    } else {
+      player.pause();
+    }
+  });
+
+  // ---------- 合成代码与任务生命周期 ----------
+  function buildCode(text) {
+    var ka = [];
+    if (+rateEl.value !== 0)
+      ka.push("rate='" + signedNum(+rateEl.value, "%") + "'");
+    if (+volEl.value !== 0)
+      ka.push("volume='" + signedNum(+volEl.value, "%") + "'");
+    if (+pitchEl.value !== 0)
+      ka.push("pitch='" + signedNum(+pitchEl.value, "Hz") + "'");
+    if (boundaryEl.value === "WordBoundary")
+      ka.push("boundary='WordBoundary'");
+    // 与 /await tts('...',voice='...',rate='+50%',response=response) 完全一致
+    return "await tts(" + JSON.stringify(text)
+      + ",voice=" + JSON.stringify(voiceEl.value)
+      + (ka.length ? "," + ka.join(",") : "")
+      + ",response=response)";
+  }
+
+  function resetEngine() {
+    if (engineMode === "mse" && mediaSource) {
+      try { if (srcBuf && mediaSource.readyState === "open") srcBuf.abort(); } catch (e) {}
+      try { if (mediaSource.readyState !== "closed") mediaSource.endOfStream(); } catch (e) {}
+      if (msUrl) { try { URL.revokeObjectURL(msUrl); } catch (e) {} }
+    }
+    if (blobUrl) { try { URL.revokeObjectURL(blobUrl); } catch (e) {} }
+    mediaSource = null; srcBuf = null; msUrl = null;
+    blobUrl = null; engineMode = "";
+    appendQueue = []; streamDone = false; allChunks = [];
+  }
+
+  function startGeneration(text, voice) {
+    if (!text || !text.trim()) {
+      statusEl.textContent = "请先输入文本";
+      return Promise.reject(new Error("empty text"));
+    }
+    if (voice) voiceEl.value = voice;
+    savePrefs();
+    generation += 1;
+    var gen = generation;
+    promoted = false;
+    player.pause();
+    resetEngine();
+    player.removeAttribute("src");
+    player.load();
+    drawWaveHint("波形生成中…");
+    statusEl.textContent = "正在合成、流式传输…";
+    player.onloadeddata = function () {
+      if (gen === generation && !promoted)
+        statusEl.textContent = "已开始播放（边下边播）";
+    };
+    player.onended = function () {
+      if (gen === generation) statusEl.textContent = "播放完成";
+    };
+    player.onerror = function () {
+      if (gen !== generation) return;
+      statusEl.textContent = "播放出错（可能是合成失败或网络中断）";
+      if (localReject) {
+        localReject(new Error("media error"));
+        localResolve = null; localReject = null;
+      }
+    };
+    var url = "/" + encodeURIComponent(buildCode(text));
+    whenLocalPromise = new Promise(function (res, rej) {
+      localResolve = res; localReject = rej;
+    });
+    if (MSE_TYPE) startMSE(url, gen);
+    else startLegacy(url, gen);
+    return whenLocalPromise;
+  }
+
+  // ---------- 引擎 A：MediaSource（fetch 流式读 → SourceBuffer 顺序追加） ----------
+  function startMSE(url, gen) {
+    engineMode = "mse";
+    mediaSource = new MediaSource();
+    msUrl = URL.createObjectURL(mediaSource);
+    player.src = msUrl;
+    // 处在点击手势的同步链路里调用 play；有数据后浏览器自然开播
+    player.play().catch(function (e) {
+      statusEl.textContent = "浏览器拦截了自动播放，请直接点击播放器：" + e.message;
+    });
+    mediaSource.addEventListener("sourceopen", function onOpen() {
+      mediaSource.removeEventListener("sourceopen", onOpen);
+      if (gen !== generation) return;
+      try {
+        srcBuf = mediaSource.addSourceBuffer(MSE_TYPE);
+        // mp3 是 generated timestamps 格式，mode 只能用 "sequence"
+        srcBuf.mode = "sequence";
+        srcBuf.addEventListener("updateend", pumpAppend);
+        srcBuf.addEventListener("error", onBufError);
+      } catch (e) {
+        failLocal(e);
+        return;
+      }
+      streamFetch(url, gen);
+    });
+  }
+
+  function onBufError() {
+    failLocal(new Error("source buffer error"));
+  }
+
+  function failLocal(e) {
+    if (localReject) {
+      localReject(e);
+      localResolve = null; localReject = null;
+    }
+  }
+
+  function streamFetch(url, gen) {
+    fetch(url).then(function (resp) {
+      if (!resp.ok || !resp.body) throw new Error("bad response " + resp.status);
+      var reader = resp.body.getReader();
+      function read() {
+        reader.read().then(function (res) {
+          if (gen !== generation) return;
+          if (res.done) { streamDone = true; pumpAppend(); return; }
+          allChunks.push(res.value);
+          appendQueue.push(res.value);
+          pumpAppend();
+          read();
+        }).catch(failLocal);
+      }
+      read();
+    }).catch(failLocal);
+  }
+
+  function pumpAppend() {
+    if (!srcBuf || srcBuf.updating) return;
+    if (appendQueue.length) {
+      var chunk = appendQueue.shift();
+      try { srcBuf.appendBuffer(chunk); } catch (e) { failLocal(e); }
+      return;
+    }
+    if (streamDone && mediaSource && mediaSource.readyState === "open") {
+      try { mediaSource.endOfStream(); } catch (e) {}
+      finishLocal(generation);
+    }
+  }
+
+  function concatChunks(chunks) {
+    var total = 0, i;
+    for (i = 0; i < chunks.length; i++) total += chunks[i].byteLength;
+    var out = new Uint8Array(total), off = 0;
+    for (i = 0; i < chunks.length; i++) {
+      out.set(chunks[i], off);
+      off += chunks[i].byteLength;
+    }
+    return out.buffer;
+  }
+
+  function finishLocal(gen) {
+    if (gen !== generation) return;
+    var full = concatChunks(allChunks);
+    decodeAndDraw(full, gen);
+    statusEl.textContent =
+      "已全部缓存到本地：可任意点击/拖动跳转，无需联网（空格可暂停/播放）";
+    if (localResolve) {
+      localResolve(state());
+      localResolve = null; localReject = null;
+    }
+  }
+
+  // ---------- 引擎 B（兜底）：直接流式播放，全量后 blob 提升 ----------
+  function startLegacy(url, gen) {
+    engineMode = "legacy";
+    player.src = url;
+    fetch(url).then(function (resp) { return resp.arrayBuffer(); })
+      .then(function (buf) {
+        if (gen !== generation) return;
+        promoteToLocal(buf, gen);
+        decodeAndDraw(buf, gen);
+      })
+      .catch(failLocal);
+    player.play().catch(function (e) {
+      statusEl.textContent = "浏览器拦截了自动播放，请直接点击播放器：" + e.message;
+    });
+  }
+
+  // 全量 mp3 已在内存 → 换成 blob ObjectURL：seekable 覆盖全曲、
+  // duration 精确、全程本地零网络请求；保留播放位置与播放状态。
+  function promoteToLocal(buf, gen) {
+    var url2 = URL.createObjectURL(new Blob([buf], { type: "audio/mpeg" }));
+    var wasPlaying = !player.paused && !player.ended;
+    var pos = player.currentTime || 0;
+    function onMeta() {
+      player.removeEventListener("loadedmetadata", onMeta);
+      if (gen !== generation) { URL.revokeObjectURL(url2); return; }
+      blobUrl = url2;
+      promoted = true;
+      try { player.currentTime = Math.min(pos, player.duration || pos); } catch (e) {}
+      if (wasPlaying) {
+        player.play().catch(function () {
+          statusEl.textContent = "已切换到本地源，请点播放器播放";
+        });
+      }
+      statusEl.textContent =
+        "已全部缓存到本地：可任意点击/拖动跳转，无需联网（空格可暂停/播放）";
+      if (localResolve) {
+        localResolve(state());
+        localResolve = null; localReject = null;
+      }
+    }
+    player.addEventListener("loadedmetadata", onMeta);
+    player.src = url2;
+  }
+
+  // ---------- 进度条/时间标签刷新 ----------
   function updateSeekUI() {
-    var total = totalSpan(), be = bufferedEnd(), cur = player.currentTime;
+    var total = totalSpan(), be = bufferedEnd(),
+        cur = player.currentTime, d = knownDuration();
     if (total > 0) {
       seekBuffered.style.width = (be / total * 100) + "%";
       seekPlayed.style.width = (Math.min(cur, be) / total * 100) + "%";
@@ -515,8 +758,8 @@ QTTS_JS = """
       seekPlayed.style.width = "0%";
     }
     timeCur.textContent = fmtTime(cur);
-    timeDur.textContent = (player.duration && player.duration > 0)
-      ? fmtTime(player.duration) : (be ? fmtTime(be) : "00:00");
+    timeBuf.textContent = "已缓存 " + fmtTime(be);
+    timeDur.textContent = d ? fmtTime(d) : "--:--";
     seekBar.setAttribute("aria-valuenow",
       total > 0 ? Math.round(cur / total * 100) : 0);
   }
@@ -525,69 +768,8 @@ QTTS_JS = """
     requestAnimationFrame(seekUILoop);
   })();
 
-  // -------- 一次合成任务：流式开播 + 全量后本地 blob 化 --------
-  function startGeneration(text, voice) {
-    if (!text || !text.trim()) {
-      $("qtts-status").textContent = "请先输入文本";
-      return Promise.reject(new Error("empty text"));
-    }
-    generation += 1;
-    var gen = generation;
-    if (blobUrl) { try { URL.revokeObjectURL(blobUrl); } catch (e) {} }
-    blobUrl = null;
-    promoted = false;
-
-    var ka = [];
-    if (+$("qtts-rate").value !== 0)
-      ka.push("rate='" + signed($("qtts-rate"), "%") + "'");
-    if (+$("qtts-volume").value !== 0)
-      ka.push("volume='" + signed($("qtts-volume"), "%") + "'");
-    if (+$("qtts-pitch").value !== 0)
-      ka.push("pitch='" + signed($("qtts-pitch"), "Hz") + "'");
-    if ($("qtts-boundary").value === "WordBoundary")
-      ka.push("boundary='WordBoundary'");
-
-    // 与 /await tts('...',voice='...',rate='+50%',response=response) 完全一致
-    var code = "await tts(" + JSON.stringify(text)
-      + ",voice=" + JSON.stringify(voice || $("qtts-voice").value)
-      + (ka.length ? "," + ka.join(",") : "")
-      + ",response=response)";
-    var url = "/" + encodeURIComponent(code);
-
-    var status = $("qtts-status");
-    player.pause();
-    player.removeAttribute("src");
-    player.load();
-    status.textContent = "正在合成、流式传输…";
-    player.onloadeddata = function () {
-      if (gen === generation && !promoted)
-        status.textContent = "已开始播放（边下边播）";
-    };
-    player.onended = function () {
-      if (gen === generation) status.textContent = "播放完成";
-    };
-    player.onerror = function () {
-      if (gen !== generation) return;
-      status.textContent = "播放出错（可能是合成失败或网络中断）";
-      if (localReject) {
-        localReject(new Error("media error"));
-        localResolve = null; localReject = null;
-      }
-    };
-
-    whenLocalPromise = new Promise(function (res, rej) {
-      localResolve = res; localReject = rej;
-    });
-    player.src = url;
-    loadWaveform(url, gen);   // 独立拉取：全量后 blob 化 + 解码画波形
-    player.play().catch(function (e) {
-      status.textContent = "浏览器拦截了自动播放，请直接点击播放器：" + e.message;
-    });
-    return whenLocalPromise;
-  }
-
-  $("qtts-btn").addEventListener("click", function () {
-    startGeneration($("qtts-text").value).catch(function () {});
+  btn.addEventListener("click", function () {
+    startGeneration(textEl.value).catch(function () {});
   });
 
   // -------- 自动化测试 / 调试接口（window.__qtts） --------
@@ -599,28 +781,35 @@ QTTS_JS = """
   }
 
   function state() {
-    var d = player.duration;
+    var d = knownDuration();
     return {
       currentTime: +player.currentTime.toFixed(3),
-      duration: (d && d > 0 && d !== Infinity) ? +d.toFixed(3) : null,
+      duration: d ? +d.toFixed(3) : null,
       bufferedEnd: +bufferedEnd().toFixed(3),
       seekable: ranges(player.seekable),
       paused: player.paused,
       ended: player.ended,
       promoted: promoted,
+      mode: engineMode,
       src: player.currentSrc || player.src || ""
     };
   }
 
   window.__qtts = {
     generate: function (text, voice) {
-      return startGeneration(text || $("qtts-text").value, voice);
+      return startGeneration(text || textEl.value, voice);
     },
     play: function () { return player.play(); },
     pause: function () { player.pause(); },
+    toggle: function () {
+      if (player.paused || player.ended) return player.play();
+      player.pause();
+      return Promise.resolve();
+    },
     seek: function (t) { seekTo(t); return state(); },
     state: state,
-    whenLocal: function () { return whenLocalPromise; }
+    whenLocal: function () { return whenLocalPromise; },
+    mseType: MSE_TYPE
   };
 })();
 """
