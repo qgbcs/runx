@@ -5,7 +5,7 @@
 
 - **项目**：MQTT/HTTP 双通道 RPC + Edge-TTS 中文语音合成
 - **部署目标 A（HuggingFace Space）**：https://huggingface1q-q.hf.space ，仓库 `huggingface1Q/q`（Gradio SDK，硬件 `zero-a10g` ZeroGPU）
-- **部署目标 B（RunxBuild）**：https://b0edc4cce.onrunxbuild.com/ ，GitHub 仓库 `qgbcs/_`（**分支 master，push 即自动构建**，私有）
+- **部署目标 B（RunxBuild）**：https://b0edc4cce.onrunxbuild.com/ ，GitHub 仓库 `qgbcs/_`（**分支 main，push 即自动构建**，私有）
 - **本地仓库**：
   - HF 版：`d:\test\github\HuggingFace_Spaces`
   - RunxBuild 版：`d:\test\github\runx`
@@ -252,11 +252,14 @@ JS 行为：
   `await tts(<JSON文本>,voice=<JSON发音人>[,rate='+30%'...],response=response)`
   （非默认参数才出现），`"/"+encodeURIComponent(code)` 设为 `player.src`，并 `player.play()`（点击是用户手势，允许自动播放）。
 - **波形**：同时 `fetch(url) → arrayBuffer → AudioContext.decodeAudioData → 分桶峰值 → canvas 绘制**；rAF 循环根据 `currentTime/duration` 把已播放部分染橙，未播放为灰色；支持 devicePixelRatio 与窗口缩放重算。波形在整段下载解码后画出，不影响音频先行开播。
-- **本地缓冲内跳转（不发网络请求）**：`#qtts-seek` 支持 pointer 点击与拖动；点击波形画布也可跳转。
-  - `totalSpan()`：有 `duration` 用 duration，流式期间未知则用 `buffered.end` 作为临时总长。
-  - `seekToFraction(fr)`：把目标位置**夹在已缓冲终点内**（`t > bufferedEnd → t = bufferedEnd`），再设 `player.currentTime`——播放中设置不会暂停，立即从新位置继续，且不产生任何网络请求。
-  - 缓冲层（浅灰）/播放层（橙）由独立 rAF 循环实时刷新；右侧时间在未知 duration 时显示已缓冲时长。
-  - 原生 `<audio controls>` 的时间轴保留：在缓冲区内同样本地跳转；点到未缓冲位置时浏览器才会发 Range 请求（服务端 206 兜底，见 §5.4）。
+- **本地缓冲内跳转（不发网络请求）**：`#qtts-seek`（`role="slider"`）支持 pointer 点击与拖动、键盘（←/→ ±5s、Home/End）；点击波形画布也可跳转。
+  - **根因（已实测）**：chunked 无 Content-Length 的 mp3 即使全部缓冲完，媒体引擎仍报 `seekable=[0,0]`（实测 duration 已知也是如此），直接设 `currentTime` 会被拒绝 → "圆点立马弹回"。
+  - **修法 = 全量后 blob 提升**：画波形那次 `fetch` 拿到完整 arrayBuffer 时，`promoteToLocal()` 立即用它建 `Blob`（`audio/mpeg`）→ `URL.createObjectURL` → 切到 blob 源（保留 currentTime 与播放状态）。blob 源 `seekable` 覆盖全曲、duration 精确，**全程本地，物理上不可能发网络请求**。
+  - 流式阶段（提升前）：seek 夹到 `bufferedEnd()`，但媒体引擎可能拒绝——此阶段尚无更多本地数据，符合"只能跳已缓存部分"。
+  - 已结束状态下 seek 会自动恢复播放。
+  - 缓冲层（浅灰）/播放层（橙）由独立 rAF 循环实时刷新并同步 `aria-valuenow`。
+- **自动化测试接口 `window.__qtts`**：`generate(text,voice)`（返回 Promise，blob 提升完成时 resolve）、`play()/pause()`、`seek(秒)`、`state()`（currentTime/duration/bufferedEnd/seekable/paused/ended/promoted/src）、`whenLocal()`。在页面控制台或 `browser_evaluate` 里调用即可全自动验证，无需手点。
+- HTTP Range 206（见 §5.4）代码保留不动，作为直连/未提升场景的兜底；常规 UI 跳转不再走网络。
 
 ## 9. 本地开发环境（Windows）
 
@@ -386,7 +389,7 @@ MP3 时长测量（本机无 mutagen 时）：`python -m pip install mutagen --p
 | 点按钮完全无反应、无网络请求 | Gradio 6 `gr.HTML` 内嵌 `<script>` 不执行 | img `onerror` 引导加载 `/qtts-ui.js` |
 | 手动测 rate 报错 | edge-tts 只接受带符号 `+30%` | 用规范化函数；int 直接可用 |
 | `/await tts(...)` → NameError tts | RPC 持久命名空间不含 app.py 的函数 | 启动时 `executor.globals_dict.update(...)` 注入 |
-| MQTT 请求超时无回包 | 服务端验签开启但客户端未用匹配私钥（ | 用与 PUBLIC_KEY 匹配的真实私钥 |
+| MQTT 请求超时无回包 | 服务端验签开启但客户端未用匹配私钥 | 用与 PUBLIC_KEY 匹配的真实私钥 |
 | 播放中拖动进度条不跳转/要暂停才能跳 | chunked 流无 Content-Length，原生时间轴无法定位未缓冲位置 | 自定义 `#qtts-seek`：只在本地缓冲范围内 seek，夹到 bufferedEnd，不发网络请求；未缓冲位置由服务端 Range 206 兜底 |
 | RunxBuild 启动即 `ModuleNotFoundError: spaces` | 平台不像 HF 预装 spaces | requirements.txt 已加 `spaces>=0.30` |
 | RunxBuild 服务无响应/健康检查失败 | 未监听平台给定 PORT | 确认用 `python app.py`（main 读取 PORT 绑 0.0.0.0），勿硬编码端口 |
