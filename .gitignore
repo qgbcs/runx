@@ -1,10 +1,14 @@
+.env
+.env.*
+!.env.example
 __pycache__/
 *.py[cod]
+*.mp3
+venv/
 .venv/
 mqtt_topics_dump.db
 mqtt_topics_dump.db-shm
 mqtt_topics_dump.db-wal
-
 client_history.db
 *.db-shm
 *.db-wal
