@@ -287,6 +287,18 @@ TTS_UI = r"""
 #（动态创建并插入的 script 元素正常执行）。
 QTTS_JS = """
 (function () {
+  // 幂等引导：Gradio 重连/重挂载或 img onerror 重复触发时本脚本会被再次注入执行。
+  // 若不拆除旧实例，document 上会叠加多个空格监听器——同一次空格被切换两次
+  //（暂停后立刻又播放），净效果就是"按空格无效"。旧实例先整体拆除再重绑。
+  if (window.__qttsTeardown) { try { window.__qttsTeardown(); } catch (e) {} }
+  var cleanups = [];
+  window.__qttsCleanups = cleanups;
+  function on(target, type, fn, opts) {
+    target.addEventListener(type, fn, opts);
+    cleanups.push(function () { target.removeEventListener(type, fn, opts); });
+  }
+  var uiAlive = true;
+
   function $(id) { return document.getElementById(id); }
 
   // ---------- 控件引用 ----------
@@ -341,18 +353,18 @@ QTTS_JS = """
   loadPrefs();
   syncLabels();
   [textEl, voiceEl, rateEl, volEl, pitchEl, boundaryEl].forEach(function (el) {
-    el.addEventListener("input", function () {
+    on(el, "input", function () {
       syncLabels(); savePrefs();
       if (urlBox.value) syncUrlBox();   // 已生成过：URL 随参数实时刷新
     });
-    el.addEventListener("change", function () {
+    on(el, "change", function () {
       savePrefs();
       if (urlBox.value) syncUrlBox();
     });
   });
   // URL 展示框：点击/聚焦即全选，方便复制
-  urlBox.addEventListener("click", function () { urlBox.select(); });
-  urlBox.addEventListener("focus", function () { urlBox.select(); });
+  on(urlBox, "click", function () { urlBox.select(); });
+  on(urlBox, "focus", function () { urlBox.select(); });
 
   // -------- 波形图（canvas 自绘，无外部依赖） --------
   var audioCtx = null;
@@ -403,7 +415,7 @@ QTTS_JS = """
       wctx.fillStyle = (i / bars) <= progress ? "#f59e0b" : "#c9c9c9";
       wctx.fillRect(i * (bw + gap), mid - barH / 2, bw, barH);
     }
-    rafId = requestAnimationFrame(drawWave);
+    if (uiAlive) rafId = requestAnimationFrame(drawWave);
   }
 
   function drawWaveHint(msg, color) {
@@ -513,19 +525,19 @@ QTTS_JS = """
     return (ev.clientX - r.left) / r.width;
   }
 
-  seekBar.addEventListener("pointerdown", function (ev) {
+  on(seekBar, "pointerdown", function (ev) {
     isDragging = true;
     try { seekBar.setPointerCapture(ev.pointerId); } catch (e) {}
     seekToFraction(fractionFromEvent(seekBar, ev));
   });
-  seekBar.addEventListener("pointermove", function (ev) {
+  on(seekBar, "pointermove", function (ev) {
     if (isDragging) seekToFraction(fractionFromEvent(seekBar, ev));
   });
-  seekBar.addEventListener("pointerup", function () { isDragging = false; });
-  seekBar.addEventListener("pointercancel", function () { isDragging = false; });
+  on(seekBar, "pointerup", function () { isDragging = false; });
+  on(seekBar, "pointercancel", function () { isDragging = false; });
 
   // 键盘（role=slider）：←/→ 5 秒，Home/End 跳到本地可达端点
-  seekBar.addEventListener("keydown", function (ev) {
+  on(seekBar, "keydown", function (ev) {
     var t = player.currentTime || 0, step = 5;
     if (ev.key === "ArrowRight") seekTo(t + step);
     else if (ev.key === "ArrowLeft") seekTo(t - step);
@@ -536,7 +548,7 @@ QTTS_JS = """
   });
 
   // 点击波形画布同样按本地缓冲跳转
-  wave.addEventListener("pointerdown", function (ev) {
+  on(wave, "pointerdown", function (ev) {
     seekToFraction(fractionFromEvent(wave, ev));
   });
 
@@ -545,7 +557,7 @@ QTTS_JS = """
     text: 1, search: 1, url: 1, tel: 1, email: 1,
     password: 1, number: 1, "": 1
   };
-  document.addEventListener("keydown", function (ev) {
+  function onSpaceKeydown(ev) {
     if (ev.code !== "Space" || ev.repeat) return;
     var tgt = ev.target, tag = (tgt && tgt.tagName || "").toLowerCase();
     // 焦点在浏览器原生播放器内部时交给原生处理，避免双方各切一次互相抵消
@@ -562,7 +574,8 @@ QTTS_JS = """
     } else {
       player.pause();
     }
-  });
+  }
+  on(document, "keydown", onSpaceKeydown);
 
   // ---------- 合成代码与任务生命周期 ----------
   function buildCode(text) {
@@ -797,11 +810,12 @@ QTTS_JS = """
       total > 0 ? Math.round(cur / total * 100) : 0);
   }
   (function seekUILoop() {
+    if (!uiAlive) return;
     updateSeekUI();
     requestAnimationFrame(seekUILoop);
   })();
 
-  btn.addEventListener("click", function () {
+  on(btn, "click", function () {
     startGeneration(textEl.value).catch(function () {});
   });
 
@@ -844,6 +858,19 @@ QTTS_JS = """
     whenLocal: function () { return whenLocalPromise; },
     mseType: MSE_TYPE
   };
+
+  // 脚本被重复注入执行时，新实例在开头调用它拆除本实例的全部全局监听/循环
+  window.__qtts.teardown = function () {
+    uiAlive = false;
+    while (cleanups.length) {
+      try { cleanups.pop()(); } catch (e) {}
+    }
+    if (rafId !== null) {
+      try { cancelAnimationFrame(rafId); } catch (e) {}
+      rafId = null;
+    }
+  };
+  window.__qttsTeardown = window.__qtts.teardown;
 })();
 """
 
