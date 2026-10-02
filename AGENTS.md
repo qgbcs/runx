@@ -260,6 +260,8 @@ JS 行为：
   - 缓冲层（浅灰）/播放层（橙）由独立 rAF 循环实时刷新并同步 `aria-valuenow`。
 - **时间显示三段式**：当前播放时间 / `已缓存 mm:ss`（此范围内可随意跳转）/ 总时长；流式期间总时长先取已缓冲终点。
 - **空格键播放/暂停**：全局 keydown（命名函数 `onSpaceKeydown`），**仅文本编辑元素**（textarea/contenteditable/文本类 input；只读框不算）放行空格，其余任何焦点位置（range 滑块、select、按钮、`#qtts-seek`）都由快捷键拦截切换；焦点在原生 `<audio>` 内部时**不拦截、交给原生**（否则双方各切一次互相抵消，表现为"按空格无效"）；已结束时空格从头播放。
+  - **空格识别必须三认**：`ev.code==="Space" || ev.key===" " || ev.keyCode===32`（含 `Spacebar` 兼容）。TRAE 内置浏览器等内嵌 WebView 下发的空格事件 `code`/`key` 都是空串、`keyCode=0`，只判 `ev.code` 会直接 return，表现为"选中进度条按空格完全无效"。
+  - **点进度条必须显式 `seekBar.focus()`**：div+tabindex 在不同浏览器/自动化点击下不一定自动聚焦；不聚焦时空格会发给上一个焦点元素（常是"生成"按钮）。
   - **脚本必须幂等**：`QTTS_JS` 所有持久监听一律走 `on(target,type,fn)`（记入 `window.__qttsCleanups`），rAF 循环检查 `uiAlive`；IIFE 开头先调用旧实例 `window.__qttsTeardown()` 再重绑。否则部署重连/Gradio 重挂载时 `img onerror` 会再次注入脚本，document 上叠加两个空格监听器，同一次按键被切换两次（暂停→立刻恢复），表现为"选中滑块按空格无效"。
 - **请求 URL 显示框**：生成按钮下方 `#qtts-url`（只读、占满面板宽度、点击全选可复制）；点击生成时填入与实际请求完全一致的完整 URL（`location.origin + "/" + encodeURIComponent(code)`），首次生成后随文本/参数改动实时刷新。
 - **localStorage 持久化**：键 `qtts-prefs-v1`，保存文本、发音人、语速/音量/音调、边界事件；刷新/重开页面自动恢复（含滑块标签），输入/改动即存。
@@ -347,6 +349,7 @@ curl.exe -sS --proxy socks5h://127.0.0.1:41080 `
 平台事实（文档：https://www.runxbuild.com/docs/services/python/ ）：
 
 - 自动执行构建命令 `pip install -r requirements.txt`；**应用必须监听 `PORT` 环境变量**并绑定 `0.0.0.0`。
+- **建 Web Service 时 Language 必须选 Python**（Settings 可改，改完 Save Configuration 再推一个提交触发重建）。选 Docker 时免费档会出现"构建成功→部署中→容器零 CPU/零日志→nginx 503"，仓库里的 Dockerfile 仅为本地容器参考，平台 Python 模式会忽略它。
 - 每次 push 到部署分支（GitHub `qgbcs/_` 的 **main 分支**；本地 runx 仓库在 master 上，推送用 `master:main`）自动触发构建+滚动部署。
 - `app.py` 的 `main()` 已满足要求：`server_port` 取 `GRADIO_SERVER_PORT`/`PORT`，`server_name="0.0.0.0"`；`ssr_mode=False` 在非 HF 环境同样生效。
 - 与 HF 的差异：
@@ -393,6 +396,8 @@ MP3 时长测量（本机无 mutagen 时）：`python -m pip install mutagen --p
 | 音频读的不是输入文字（`ä½ å¥½` 式乱码朗读） | WSGI PATH_INFO 按 PEP3333 用 latin-1 承载字节，被直接当文本，且又被 unquote | shim 中 `encode('latin-1').decode('utf-8')` + `path_already_decoded` 跳过二次 unquote |
 | 点按钮完全无反应、无网络请求 | Gradio 6 `gr.HTML` 内嵌 `<script>` 不执行 | img `onerror` 引导加载 `/qtts-ui.js` |
 | 选中滑块按空格"无效"（新标签页正常，旧标签页不行） | 部署重连/Gradio 重挂载后脚本被再次注入，document 叠加多个空格监听器，一次按键被切换两次互相抵消 | `QTTS_JS` 幂等：旧实例 `__qttsTeardown()` 拆除全部监听/rAF 后再重绑（`on()` 统一登记，`uiAlive` 守卫 rAF） |
+| 内嵌 WebView（TRAE 内置浏览器）里选中进度条按空格无效 | 内嵌 WebView 的空格事件 `code`/`key` 为空串，只判 `ev.code==="Space"` 全部漏判；且点击 div 进度条不一定自动聚焦，空格发给了原焦点按钮 | `onSpaceKeydown` 三认 `code/key/keyCode===32`；`pointerdown` 里显式 `seekBar.focus()` |
+| RunxBuild 新服务 503，Metrics 全 0、日志只有"Deploying application" | 建服务时 Language 选成了 **Docker**（免费档容器运行时起不来）；昨天可用的旧服务是 **Python** 构建（pip buildpack） | Settings → Language 改 **Python**，Build=`pip install -r requirements.txt`，Start=`python app.py`，Save 后推空提交触发重建 |
 | 手动测 rate 报错 | edge-tts 只接受带符号 `+30%` | 用规范化函数；int 直接可用 |
 | `/await tts(...)` → NameError tts | RPC 持久命名空间不含 app.py 的函数 | 启动时 `executor.globals_dict.update(...)` 注入 |
 | MQTT 请求超时无回包 | 服务端验签开启但客户端未用匹配私钥 | 用与 PUBLIC_KEY 匹配的真实私钥 |
@@ -419,6 +424,8 @@ a54dc18 ssr_mode=False，自定义路由可达
 （本地）MediaSource 流式引擎：已缓存区间原生 seekable，seek 弹回根治；legacy 引擎保留 blob 提升；空格播放/暂停；三段时间（含已缓存）；localStorage 持久化文本与全部设置；移除 torch 修复 runx 构建 OOMKilled
 （本地）空格快捷键修正：仅文本编辑元素放行（修复滑块聚焦时空格无效；原生 audio 焦点交原生避免双切换）；生成按钮下新增全宽只读 URL 显示框（生成时填充、参数实时刷新、点击全选）；multi_mqtt 以 D:\test\multi_mqtt 为唯一上游同步到两个仓库
 （本地）根治"旧标签页滑块空格无效"：脚本重注入导致 document 叠加多个空格监听器→一次按键双切换抵消；QTTS_JS 改为幂等（on() 登记+__qttsTeardown 拆除+uiAlive 守卫 rAF），Playwright 真实鼠标点击滑块+真实空格按键验证
+（线上）TRAE 内置浏览器里"选中进度条空格无效"：内嵌 WebView 空格事件 code/key 为空串→只认 ev.code 漏判；onSpaceKeydown 改为 code/key/keyCode===32 三认，pointerdown 显式 seekBar.focus()
+（线上）RunxBuild 新服务（ba69e75bc）全天 503：建服务时 Language 误选 Docker，免费档容器零指标、无日志、nginx 503；Settings 改 Python（pip install -r requirements.txt / python app.py）+ 空提交触发重建后恢复；以后新建 RunxBuild 服务必须选 Python
 ```
 
 ## 14. 安全红线
