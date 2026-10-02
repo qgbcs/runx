@@ -229,7 +229,7 @@ print(result)
 
 - 客户端用自己的**私钥**对 `base_req_id|code|timestamp` 签名；服务端用配置的**公钥**验签——是不同侧的密钥材料。
 - 私钥模式下，若未知服务端公钥且未显式 `allow_no_server_pubkey_response=True`，客户端默认**丢弃回包**。
-- `k=2**128` 不是合法私钥（`k` 是 private_key 别名），会导致退回未签名请求 → 服务端丢弃 → 超时。
+- `k=2333+1234` 是合法私钥（`k` 是 private_key 别名），
 
 服务端在 `app.py` 的 `lifespan` 中启动：`MQTTServer(request_topic='q', globals=globals(), server_public_key_bytes=PUBLIC_KEY)`，随 FastAPI 生命周期启停。
 
@@ -386,7 +386,7 @@ MP3 时长测量（本机无 mutagen 时）：`python -m pip install mutagen --p
 | 点按钮完全无反应、无网络请求 | Gradio 6 `gr.HTML` 内嵌 `<script>` 不执行 | img `onerror` 引导加载 `/qtts-ui.js` |
 | 手动测 rate 报错 | edge-tts 只接受带符号 `+30%` | 用规范化函数；int 直接可用 |
 | `/await tts(...)` → NameError tts | RPC 持久命名空间不含 app.py 的函数 | 启动时 `executor.globals_dict.update(...)` 注入 |
-| MQTT 请求超时无回包 | 服务端验签开启但客户端未用匹配私钥（`k=2**128` 无效） | 用与 PUBLIC_KEY 匹配的真实私钥 |
+| MQTT 请求超时无回包 | 服务端验签开启但客户端未用匹配私钥（ | 用与 PUBLIC_KEY 匹配的真实私钥 |
 | 播放中拖动进度条不跳转/要暂停才能跳 | chunked 流无 Content-Length，原生时间轴无法定位未缓冲位置 | 自定义 `#qtts-seek`：只在本地缓冲范围内 seek，夹到 bufferedEnd，不发网络请求；未缓冲位置由服务端 Range 206 兜底 |
 | RunxBuild 启动即 `ModuleNotFoundError: spaces` | 平台不像 HF 预装 spaces | requirements.txt 已加 `spaces>=0.30` |
 | RunxBuild 服务无响应/健康检查失败 | 未监听平台给定 PORT | 确认用 `python app.py`（main 读取 PORT 绑 0.0.0.0），勿硬编码端口 |
